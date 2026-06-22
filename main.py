@@ -5,7 +5,6 @@ import uuid
 from typing_extensions import TypedDict, Annotated
 from typing import Literal
 import operator
-from IPython.display import Image, display
 from dotenv import load_dotenv
 
 from langchain.tools import tool
@@ -174,48 +173,46 @@ agent = agent_builder.compile(checkpointer=checkpointer)
 #     f.write(graph_png)
 # print("\nGraph saved as my_agent_graph.png\n")
 
-# Invoke
-messages = [HumanMessage(content=input("\nWhat is on your mind for today?\n"))]   #"Add 3 and 4."
 
-# Initial run - hits the interrupt and pauses
-# thread_id is the persistent pointer (stores a stable ID in production)
-config = {
-    "configurable": {
-        "thread_id": uuid.uuid4(),
+def main():
+    # Invoke
+    messages = [HumanMessage(content=input("\nWhat is on your mind for today?\n"))]
+
+    # Initial run - hits the interrupt and pauses
+    # thread_id is the persistent pointer (stores a stable ID in production)
+    config = {
+        "configurable": {
+            "thread_id": uuid.uuid4(),
+        }
     }
-}
 
-messages = agent.invoke(
-    {"messages": messages},
-    config=config
-)
+    messages = agent.invoke(
+        {"messages": messages},
+        config=config
+    )
 
-# Creating a Loop for a dynamic user input response
-while True:
-    if "__interrupt__" in messages and messages["__interrupt__"]:
-        # Check what was interrupted
-        # __interrupt__ contains the payload that was passed to interrupt()
-        print(messages["__interrupt__"])
+    # Creating a Loop for a dynamic user input response
+    while True:
+        if "__interrupt__" in messages and messages["__interrupt__"]:
+            # Check what was interrupted
+            # __interrupt__ contains the payload that was passed to interrupt()
+            print(messages["__interrupt__"])
 
-        # Get dynamic user response from the terminal
-        user_input = input("\nYour Response: ")
+            # Get dynamic user response from the terminal
+            user_input = input("\nYour Response: ")
 
-        if user_input.lower() == 'exit':
+            if user_input.lower() == 'exit':
+                break
+                
+            # Resume the graph with the human's input. The resume payload becomes the return value of interrupt() inside the node.
+            messages = agent.invoke(Command(resume=user_input), config=config)
+
+        else:
             break
-            
-        # Resume the graph with the human's input. The resume payload becomes the return value of interrupt() inside the node.
-        messages = agent.invoke(Command(resume=user_input), config=config)
-
-    else:
-        break
 
 
-for m in messages["messages"]:
-    m.pretty_print()
+    for m in messages["messages"]:
+        m.pretty_print()
 
-# def main():
-#     print("Hello from henkel-chatbot!")
-
-
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

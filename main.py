@@ -1,10 +1,19 @@
 # Step 1: Define tools and model
 
 import os
+import uuid
+from typing_extensions import TypedDict, Annotated
+from typing import Literal
+import operator
+from IPython.display import Image, display
 from dotenv import load_dotenv
+
 from langchain.tools import tool
-# from langchain.chat_models import init_chat_model
 from langchain_groq import ChatGroq
+from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver
 
 # Load the variables from the .env file into the environment
 load_dotenv()
@@ -63,18 +72,11 @@ model_with_tools = model.bind_tools(tools)
 
 # Step 2: Define state
 
-from langchain.messages import AnyMessage
-from typing_extensions import TypedDict, Annotated
-import operator
-
-
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     llm_calls: int
 
 # Step 3: Define model node
-from langchain.messages import SystemMessage
-
 
 def llm_call(state: MessagesState):
     """LLM decides whether to call a tool or not"""
@@ -94,10 +96,7 @@ def llm_call(state: MessagesState):
     }
 
 
-# Step 4: Define tool node
-
-from langchain.messages import ToolMessage
-
+# Step 4: Define tool node and review node for human input interrupts
 
 def tool_node(state: MessagesState):
     """Performs the tool call"""
@@ -109,24 +108,39 @@ def tool_node(state: MessagesState):
         result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
     return {"messages": result}
 
-# Step 5: Define logic to determine whether to end
+# Add this for human input interrupts.
+def review_node(state: MessagesState):
+    """Review the LLM output and answer it"""
 
-from typing import Literal
-from langgraph.graph import StateGraph, START, END
+    last_message = state["messages"][-1].content 
+    # Pause and show the current content for review (surfaces in result["__interrupt__"])
+    # edited_content = interrupt({
+    #     "instruction": "Review and reply to this content",
+    #     "content": last_message
+    # })
+    edited_content = interrupt(last_message) # This value will be sent to the client as part of the interrupt information.
+
+    # Update the state with the edited version
+    return {"messages": [HumanMessage(content=edited_content)]}
 
 
-# Conditional edge function to route to the tool node or end based upon whether the LLM made a tool call
-def should_continue(state: MessagesState) -> Literal["tool_node", END]:
+# Step 5: Define logic to determine whether to end 
+
+# Conditional edge function to route to the tool node or review node based upon whether the LLM made a tool call
+def should_continue(state: MessagesState) -> Literal["tool_node", "review_node", END]:
     """Decide if we should continue the loop or stop based upon whether the LLM made a tool call"""
 
     messages = state["messages"]
     last_message = messages[-1]
 
-    # If the LLM makes a tool call, then perform an action
+    # Check the tool calls first before any human input.
     if last_message.tool_calls:
         return "tool_node"
-
-    # Otherwise, we stop (reply to the user)
+    
+    # If there is text content but no tools, send to human for review.
+    if last_message.content:
+        return "review_node"
+    
     return END
 
 # Step 6: Build agent
@@ -137,28 +151,65 @@ agent_builder = StateGraph(MessagesState)
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
 agent_builder.add_node("tool_node", tool_node)
+agent_builder.add_node("review_node", review_node)
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
 agent_builder.add_conditional_edges(
     "llm_call",
     should_continue,
-    ["tool_node", END]
+    ["tool_node", "review_node", END]
 )
 agent_builder.add_edge("tool_node", "llm_call")
+agent_builder.add_edge("review_node", "llm_call")
+
+checkpointer = InMemorySaver()
 
 # Compile the agent
-agent = agent_builder.compile()
+agent = agent_builder.compile(checkpointer=checkpointer)
 
-
-from IPython.display import Image, display
-# Show the agent
-display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
+# # Show the agent
+# graph_png = agent.get_graph(xray=True).draw_mermaid_png()
+# with open("my_agent_graph.png", "wb") as f:
+#     f.write(graph_png)
+# print("\nGraph saved as my_agent_graph.png\n")
 
 # Invoke
-from langchain.messages import HumanMessage
-messages = [HumanMessage(content="Add 3 and 4.")]
-messages = agent.invoke({"messages": messages})
+messages = [HumanMessage(content=input("\nWhat is on your mind for today?\n"))]   #"Add 3 and 4."
+
+# Initial run - hits the interrupt and pauses
+# thread_id is the persistent pointer (stores a stable ID in production)
+config = {
+    "configurable": {
+        "thread_id": uuid.uuid4(),
+    }
+}
+
+messages = agent.invoke(
+    {"messages": messages},
+    config=config
+)
+
+# Creating a Loop for a dynamic user input response
+while True:
+    if "__interrupt__" in messages and messages["__interrupt__"]:
+        # Check what was interrupted
+        # __interrupt__ contains the payload that was passed to interrupt()
+        print(messages["__interrupt__"])
+
+        # Get dynamic user response from the terminal
+        user_input = input("\nYour Response: ")
+
+        if user_input.lower() == 'exit':
+            break
+            
+        # Resume the graph with the human's input. The resume payload becomes the return value of interrupt() inside the node.
+        messages = agent.invoke(Command(resume=user_input), config=config)
+
+    else:
+        break
+
+
 for m in messages["messages"]:
     m.pretty_print()
 

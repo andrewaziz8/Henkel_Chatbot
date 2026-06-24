@@ -61,25 +61,25 @@ pprint.pp(final_chunks[24])
 # embeddings = HuggingFaceEmbeddings(model_name="Qwen/Qwen3-Embedding-0.6B")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# 4. Create the vector Store using Qdrant
-qdrant = QdrantVectorStore.from_documents(
-    final_chunks,
-    embeddings,
-    url=qdrant_url,
-    prefer_grpc=True,
-    force_recreate=True,  # Set to True to overwrite the existing collection if it exists
-    api_key=api_key_qdrant,
-    collection_name="iphone_user_guide",
-)
-
-# # Connect to the already-populated database
-# qdrant = QdrantVectorStore.from_existing_collection(
-#     collection_name="iphone_user_guide",
-#     embedding=embeddings, # The same embedding model you used in ingest.py
+# # 4. Create the vector Store using Qdrant
+# qdrant = QdrantVectorStore.from_documents(
+#     final_chunks,
+#     embeddings,
 #     url=qdrant_url,
 #     prefer_grpc=True,
+#     force_recreate=True,  # Set to True to overwrite the existing collection if it exists
 #     api_key=api_key_qdrant,
+#     collection_name="iphone_user_guide",
 # )
+
+# Connect to the already-populated database
+qdrant = QdrantVectorStore.from_existing_collection(
+    collection_name="iphone_user_guide",
+    embedding=embeddings, # The same embedding model you used in ingest.py
+    url=qdrant_url,
+    prefer_grpc=True,
+    api_key=api_key_qdrant,
+)
 
 # to add documents to the vector store, you can use the following command:
 # uuids = [str(uuid4()) for _ in range(len(final_chunks))]

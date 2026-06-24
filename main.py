@@ -1,5 +1,3 @@
-# Step 1: Define tools and model
-
 import os
 import uuid
 from typing_extensions import TypedDict, Annotated
@@ -8,64 +6,89 @@ import operator
 from dotenv import load_dotenv
 
 from langchain.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant import QdrantVectorStore
 
 # Load the variables from the .env file into the environment
 load_dotenv()
 # Access the key using os.environ
-api_key = os.environ.get("GROQ_API_KEY")
+groq_api_key = os.environ.get("GROQ_API_KEY")
+google_api_key = os.environ.get("GOOGLE_API_KEY")
+qdrant_url = os.environ.get("QDRANT_URL")
+api_key_qdrant = os.environ.get("QDRANT_API_KEY")
 
-model = ChatGroq(
-    model="qwen/qwen3-32b",
-    api_key=api_key,
-    temperature=0.4,
+# Step 1: Define tools and model
+
+# model = ChatGroq(
+#     model="openai/gpt-oss-120b", # "openai/gpt-oss-120b", "qwen/qwen3-32b"
+#     api_key=groq_api_key, 
+#     temperature=0.4,
+#     max_tokens=None,
+#     timeout=None,
+#     max_retries=2,
+#     # reasoning_format="parsed"
+# )
+
+model = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite", # "gemini-3.1-flash-lite", "gemini-3.5-flash"
+    api_key=google_api_key,
+    temperature=0.4,  # Gemini 3.0+ defaults to 1.0
     max_tokens=None,
     timeout=None,
     max_retries=2,
-    # reasoning_format="parsed"
+    # other params...
 )
 
 
 # Define RAG tools
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+# Connect to the already-populated database
+qdrant = QdrantVectorStore.from_existing_collection(
+    collection_name="iphone_user_guide",
+    embedding=embeddings, # The same embedding model you used in ingest.py
+    url=qdrant_url,
+    prefer_grpc=True,
+    api_key=api_key_qdrant,
+)
+
+# 2. Define RAG Tool
 @tool
-def multiply(a: int, b: int) -> int:
-    """Multiply `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
+def search_document(query: str) -> str:
     """
-    return a * b
-
-
-@tool
-def add(a: int, b: int) -> int:
-    """Adds `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
+    Search the document for information related to the user's query.
+    Always use this tool to retrieve information before answering any question.
     """
-    return a + b
+    results = qdrant.similarity_search(query, k=3)
+    
+    if not results:
+        return "No relevant information found in the document."
 
+    # Format the results to explicitly inject metadata (Page, Chapter, Section) into the LLM's context window
+    formatted_results = []
+    for res in results:
+        page = res.metadata.get('page', 'Unknown Page')
+        chapter = res.metadata.get('Chapter', 'Unknown Chapter')
+        section = res.metadata.get('Section', '')
+        
+        # Build the citation string based on available metadata
+        citation = f"Page {page}, Chapter: {chapter}"
+        if section:
+            citation += f", Section: {section}"
+            
+        formatted_results.append(f"--- CONTENT SOURCE: [{citation}] ---\n{res.page_content}\n")
 
-@tool
-def divide(a: int, b: int) -> float:
-    """Divide `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
-    """
-    return a / b
+    return "\n\n".join(formatted_results)
 
 
 # Augment the LLM with tools
-tools = [add, multiply, divide]
+tools = [search_document]
 tools_by_name = {tool.name: tool for tool in tools}
 model_with_tools = model.bind_tools(tools)
 
@@ -79,13 +102,39 @@ class MessagesState(TypedDict):
 
 def llm_call(state: MessagesState):
     """LLM decides whether to call a tool or not"""
+    
+# Strict System Prompt to enforce assessment constraints
+    system_prompt = """You are an expert assistant designed to answer questions strictly based on the provided document, the "iPhone User Guide For iOS 7.1 Software", which contains all the information related to this iPhone.
+
+Your behavior MUST adhere to the following rules:
+1. ALWAYS call the `search_document` tool to retrieve information before answering any question about the iphone guide to the user.
+2. If the retrieved context does not contain the answer, you MUST explicitly state: "I cannot find the answer to this in the provided document."
+3. NEVER fabricate information, guess, make assumptions, or rely on your general knowledge to answer any question about the iphone guide.
+4. Every response MUST include a citation at the end of the sentence or paragraph referencing the specific Page and Chapter/Section where the information was found in the retrieved context (e.g., [Page 5, Chapter: Setup]).
+
+Do not break these rules under any circumstances."""
+
+
+#     system_prompt = """You are an expert assistant that answers questions STRICTLY based on \
+# the provided document: "iPhone User Guide For iOS 7.1 Software".
+ 
+# Rules you must NEVER break:
+# 1. You have already retrieved relevant passages from the document via the \
+# `search_document` tool. Use ONLY those passages to compose your answer.
+# 2. If the retrieved passages do not contain the answer, respond with exactly: \
+# "I cannot find the answer to this in the provided document."
+# 3. NEVER use your general knowledge, make assumptions, or fabricate information.
+# 4. Every sentence or paragraph in your answer MUST end with a citation in this \
+# format: [Page X, Chapter: Y] or [Page X, Chapter: Y, Section: Z].
+#    Use the citation metadata provided in the CONTENT SOURCE headers of the \
+# retrieved context."""
 
     return {
         "messages": [
             model_with_tools.invoke(
                 [
                     SystemMessage(
-                        content="You are a helpful assistant tasked with performing arithmetic on a set of inputs."
+                        content=system_prompt
                     )
                 ]
                 + state["messages"]
@@ -182,7 +231,7 @@ def main():
     # thread_id is the persistent pointer (stores a stable ID in production)
     config = {
         "configurable": {
-            "thread_id": uuid.uuid4(),
+            "thread_id": str(uuid.uuid4()),
         }
     }
 

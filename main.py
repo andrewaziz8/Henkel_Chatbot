@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
@@ -18,54 +17,43 @@ from langchain_qdrant import QdrantVectorStore
 # Load the variables from the .env file into the environment
 load_dotenv()
 # Access the key using os.environ
-groq_api_key = os.environ.get("GROQ_API_KEY")
 google_api_key = os.environ.get("GOOGLE_API_KEY")
 qdrant_url = os.environ.get("QDRANT_URL")
 api_key_qdrant = os.environ.get("QDRANT_API_KEY")
 
-# Step 1: Define tools and model
 
-# model = ChatGroq(
-#     model="openai/gpt-oss-120b", # "openai/gpt-oss-120b", "qwen/qwen3-32b"
-#     api_key=groq_api_key, 
-#     temperature=0.4,
-#     max_tokens=None,
-#     timeout=None,
-#     max_retries=2,
-#     # reasoning_format="parsed"
-# )
+# Step 1: Define Chat model, embedding model, vector store, and RAG tool
 
+# Chat model
 model = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite", # "gemini-3.1-flash-lite", "gemini-3.5-flash"
+    model="gemini-3.1-flash-lite",
     api_key=google_api_key,
-    temperature=0.4,  # Gemini 3.0+ defaults to 1.0
+    temperature=0.4,
     max_tokens=None,
     timeout=None,
     max_retries=2,
-    # other params...
 )
 
-
-# Define RAG tools
+# Embedding model
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# Connect to the already-populated database
+# Connect to the already-populated Qdrant vector store
 qdrant = QdrantVectorStore.from_existing_collection(
     collection_name="iphone_user_guide",
-    embedding=embeddings, # The same embedding model you used in ingest.py
+    embedding=embeddings,
     url=qdrant_url,
     prefer_grpc=True,
     api_key=api_key_qdrant,
 )
 
-# 2. Define RAG Tool
+# RAG Tool
 @tool
 def search_document(query: str) -> str:
     """
     Search the document for information related to the user's query.
     Always use this tool to retrieve information before answering any question.
     """
-    results = qdrant.similarity_search(query, k=3)
+    results = qdrant.similarity_search(query, k=5)
     
     if not results:
         return "No relevant information found in the document."
@@ -74,11 +62,15 @@ def search_document(query: str) -> str:
     formatted_results = []
     for res in results:
         page = res.metadata.get('page', 'Unknown Page')
-        chapter = res.metadata.get('Chapter', 'Unknown Chapter')
+        chapter = res.metadata.get('Chapter', '')
         section = res.metadata.get('Section', '')
+
+        # Build the citation string dynamically based on available metadata
+        citation = f"Page {page}"
         
-        # Build the citation string based on available metadata
-        citation = f"Page {page}, Chapter: {chapter}"
+        if chapter:
+            citation += f", Chapter: {chapter}"
+
         if section:
             citation += f", Section: {section}"
             
@@ -92,14 +84,13 @@ tools = [search_document]
 tools_by_name = {tool.name: tool for tool in tools}
 model_with_tools = model.bind_tools(tools)
 
-# Step 2: Define state
 
+# Step 2: Define state
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     llm_calls: int
 
 # Step 3: Define model node
-
 def llm_call(state: MessagesState):
     """LLM decides whether to call a tool or not"""
     
@@ -110,24 +101,10 @@ Your behavior MUST adhere to the following rules:
 1. ALWAYS call the `search_document` tool to retrieve information before answering any question about the iphone guide to the user.
 2. If the retrieved context does not contain the answer, you MUST explicitly state: "I cannot find the answer to this in the provided document."
 3. NEVER fabricate information, guess, make assumptions, or rely on your general knowledge to answer any question about the iphone guide.
-4. Every response MUST include a citation at the end of the sentence or paragraph referencing the specific Page and Chapter/Section where the information was found in the retrieved context (e.g., [Page 5, Chapter: Setup]).
+4. Every response MUST include a citation referencing the specific Page and Chapter/Section where the information was found in the retrieved context (e.g., [Page 5, Chapter: Setup]). 
+5. CITATION FORMATTING: Consolidate your citations. If multiple sentences in a row or an entire paragraph come from the exact same Page and Chapter, only put the citation ONCE at the very end of that paragraph. Do not repeat the exact same citation multiple times.
 
 Do not break these rules under any circumstances."""
-
-
-#     system_prompt = """You are an expert assistant that answers questions STRICTLY based on \
-# the provided document: "iPhone User Guide For iOS 7.1 Software".
- 
-# Rules you must NEVER break:
-# 1. You have already retrieved relevant passages from the document via the \
-# `search_document` tool. Use ONLY those passages to compose your answer.
-# 2. If the retrieved passages do not contain the answer, respond with exactly: \
-# "I cannot find the answer to this in the provided document."
-# 3. NEVER use your general knowledge, make assumptions, or fabricate information.
-# 4. Every sentence or paragraph in your answer MUST end with a citation in this \
-# format: [Page X, Chapter: Y] or [Page X, Chapter: Y, Section: Z].
-#    Use the citation metadata provided in the CONTENT SOURCE headers of the \
-# retrieved context."""
 
     return {
         "messages": [
@@ -145,7 +122,6 @@ Do not break these rules under any circumstances."""
 
 
 # Step 4: Define tool node and review node for human input interrupts
-
 def tool_node(state: MessagesState):
     """Performs the tool call"""
 
@@ -161,11 +137,6 @@ def review_node(state: MessagesState):
     """Review the LLM output and answer it"""
 
     last_message = state["messages"][-1].content 
-    # Pause and show the current content for review (surfaces in result["__interrupt__"])
-    # edited_content = interrupt({
-    #     "instruction": "Review and reply to this content",
-    #     "content": last_message
-    # })
     edited_content = interrupt(last_message) # This value will be sent to the client as part of the interrupt information.
 
     # Update the state with the edited version
@@ -227,8 +198,6 @@ def main():
     # Invoke
     messages = [HumanMessage(content=input("\nWhat is on your mind for today?\n"))]
 
-    # Initial run - hits the interrupt and pauses
-    # thread_id is the persistent pointer (stores a stable ID in production)
     config = {
         "configurable": {
             "thread_id": str(uuid.uuid4()),

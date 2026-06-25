@@ -42,7 +42,7 @@ qdrant = QdrantVectorStore.from_existing_collection(
     collection_name="iphone_user_guide",
     embedding=embeddings,
     url=qdrant_url,
-    prefer_grpc=True,
+    # prefer_grpc=True,  # comment this for the docker to run well.
     api_key=api_key_qdrant,
 )
 

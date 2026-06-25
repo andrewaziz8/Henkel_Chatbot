@@ -72,6 +72,7 @@ The application is exposed on port 8501. Run the container and map it to your lo
 ```bash
 docker run -p 8501:8501 --env-file .env chatbot:1.0
 ```
+Note: The weights for the open source embedding model may take some time to be loaded.
 
 ### 5. Chat
 Once the container starts running, open your web browser and navigate to:
